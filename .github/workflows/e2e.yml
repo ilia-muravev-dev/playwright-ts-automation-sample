@@ -1,0 +1,137 @@
+name: e2e
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # Catches breakage coming from the application rather than from this repo.
+    - cron: '0 3 * * *'
+
+jobs:
+  typescript:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ hashFiles('package-lock.json') }}
+
+      - run: npx playwright install --with-deps chromium
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+
+      - run: npx playwright install-deps chromium
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+
+      - run: npm run typecheck
+
+      # The demo site is behind Cloudflare and answers GitHub-hosted runners
+      # with a verification page. Skip the browser run deliberately instead of
+      # failing on someone else's bot protection.
+      - name: Probe the UI host for bot protection
+        id: probe
+        run: |
+          body=$(curl -sS -A "Mozilla/5.0" --max-time 30 "$BASE_URL" || true)
+          if grep -qiE 'security verification|cf-chl|challenge-platform' <<<"$body"; then
+            echo "challenged=true" >> "$GITHUB_OUTPUT"
+            echo "UI host is behind a Cloudflare challenge from this runner, browser tests are skipped." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "challenged=false" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          BASE_URL: ${{ vars.BASE_URL || 'https://practicesoftwaretesting.com' }}
+
+      - name: Run API tests
+        run: npx playwright test --project=api
+        env:
+          API_URL: ${{ vars.API_URL || 'https://api.practicesoftwaretesting.com' }}
+          CUSTOMER_EMAIL: ${{ secrets.CUSTOMER_EMAIL || 'customer@practicesoftwaretesting.com' }}
+          CUSTOMER_PASSWORD: ${{ secrets.CUSTOMER_PASSWORD || 'welcome01' }}
+
+      - name: Run browser tests
+        if: steps.probe.outputs.challenged != 'true'
+        run: npx playwright test --project=ui --project=ui-mobile
+        env:
+          BASE_URL: ${{ vars.BASE_URL || 'https://practicesoftwaretesting.com' }}
+          API_URL: ${{ vars.API_URL || 'https://api.practicesoftwaretesting.com' }}
+          CUSTOMER_EMAIL: ${{ secrets.CUSTOMER_EMAIL || 'customer@practicesoftwaretesting.com' }}
+          CUSTOMER_PASSWORD: ${{ secrets.CUSTOMER_PASSWORD || 'welcome01' }}
+
+      - name: Publish test summary
+        uses: mikepenz/action-junit-report@v4
+        if: always()
+        with:
+          report_paths: test-results/junit.xml
+          include_passed: true
+          detailed_summary: true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 14
+
+  java:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: java
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: maven
+
+      - name: Probe the UI host for bot protection
+        id: probe
+        run: |
+          body=$(curl -sS -A "Mozilla/5.0" --max-time 30 "$BASE_URL" || true)
+          if grep -qiE 'security verification|cf-chl|challenge-platform' <<<"$body"; then
+            echo "challenged=true" >> "$GITHUB_OUTPUT"
+            echo "UI host is behind a Cloudflare challenge from this runner, Java browser tests are skipped." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "challenged=false" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          BASE_URL: ${{ vars.BASE_URL || 'https://practicesoftwaretesting.com' }}
+
+      - name: Run API tests
+        run: ./mvnw -B test -Dgroups=api
+        env:
+          API_URL: ${{ vars.API_URL || 'https://api.practicesoftwaretesting.com' }}
+          CUSTOMER_EMAIL: ${{ secrets.CUSTOMER_EMAIL || 'customer@practicesoftwaretesting.com' }}
+          CUSTOMER_PASSWORD: ${{ secrets.CUSTOMER_PASSWORD || 'welcome01' }}
+
+      - name: Run browser tests
+        if: steps.probe.outputs.challenged != 'true'
+        run: ./mvnw -B test -Dgroups=ui
+        env:
+          BASE_URL: ${{ vars.BASE_URL || 'https://practicesoftwaretesting.com' }}
+          API_URL: ${{ vars.API_URL || 'https://api.practicesoftwaretesting.com' }}
+          CUSTOMER_EMAIL: ${{ secrets.CUSTOMER_EMAIL || 'customer@practicesoftwaretesting.com' }}
+          CUSTOMER_PASSWORD: ${{ secrets.CUSTOMER_PASSWORD || 'welcome01' }}
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: surefire-reports
+          path: java/target/surefire-reports/
+          retention-days: 14
